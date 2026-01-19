@@ -1,18 +1,23 @@
-import os, time, requests
+import os
+import time
+import requests
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timezone
 
 CG_BASE = "https://api.coingecko.com/api/v3"
 BINANCE_BASE = "https://api.binance.com"
-
 DEFAULT_TOPN = 150
 
+# -----------------------------
+# Helpers: CoinGecko
+# -----------------------------
 def cg_get(path, params=None):
-    if params is None: params = {}
+    if params is None:
+        params = {}
     key = os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
     if not key:
-        raise RuntimeError("COINGECKO_DEMO_API_KEY ist nicht gesetzt (Streamlit Secrets / Env).")
+        raise RuntimeError("COINGECKO_DEMO_API_KEY ist nicht gesetzt (Streamlit Secrets / Environment).")
     params["x_cg_demo_api_key"] = key
     r = requests.get(CG_BASE + path, params=params, timeout=30)
     r.raise_for_status()
@@ -20,6 +25,7 @@ def cg_get(path, params=None):
 
 @st.cache_data(ttl=3600)
 def get_top_markets(vs="usd", top_n=150):
+    # /coins/markets liefert Krypto-Coins nach Market Cap (keine Aktien/ETFs)
     out = []
     per_page = 250
     page = 1
@@ -31,24 +37,57 @@ def get_top_markets(vs="usd", top_n=150):
             "page": page,
             "sparkline": "false"
         })
-        if not batch: break
+        if not batch:
+            break
         out.extend(batch)
         page += 1
         time.sleep(0.8)
     return out[:top_n]
 
+def cg_ohlc_utc_daily(coin_id, vs="usd", days_fetch=90):
+    # Aggregiert CoinGecko OHLC auf UTC-Tage, entfernt "heute" (unfertig)
+    raw = cg_get(f"/coins/{coin_id}/ohlc", {"vs_currency": vs, "days": days_fetch})
+
+    day = {}
+    for ts, o, h, l, c in raw:
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        key = dt.date().isoformat()
+        if key not in day:
+            day[key] = {"high": h, "low": l, "close": c, "last_ts": ts}
+        else:
+            day[key]["high"] = max(day[key]["high"], h)
+            day[key]["low"] = min(day[key]["low"], l)
+            if ts > day[key]["last_ts"]:
+                day[key]["close"] = c
+                day[key]["last_ts"] = ts
+
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    keys = sorted(k for k in day.keys() if k != today_utc)
+
+    rows = []
+    for k in keys:
+        rows.append({
+            "date_utc": k,
+            "high": float(day[k]["high"]),
+            "low": float(day[k]["low"]),
+            "close": float(day[k]["close"]),
+            "range": float(day[k]["high"] - day[k]["low"]),
+        })
+    return rows
+
+# -----------------------------
+# Helpers: Binance
+# -----------------------------
 @st.cache_data(ttl=3600)
-def binance_exchange_info():
+def binance_symbols_set():
     r = requests.get(BINANCE_BASE + "/api/v3/exchangeInfo", timeout=30)
     r.raise_for_status()
-    return r.json()
-
-def binance_symbol_exists(exchange_info, symbol):
-    # symbol like "BTCUSDT"
-    for s in exchange_info.get("symbols", []):
-        if s.get("symbol") == symbol and s.get("status") == "TRADING":
-            return True
-    return False
+    info = r.json()
+    syms = set()
+    for s in info.get("symbols", []):
+        if s.get("status") == "TRADING":
+            syms.add(s.get("symbol"))
+    return syms
 
 def binance_klines(symbol, interval, limit=200):
     r = requests.get(BINANCE_BASE + "/api/v3/klines", params={
@@ -58,7 +97,6 @@ def binance_klines(symbol, interval, limit=200):
     }, timeout=30)
     r.raise_for_status()
     data = r.json()
-    # [ openTime, open, high, low, close, volume, closeTime, ... ]
     rows = []
     for k in data:
         rows.append({
@@ -72,62 +110,43 @@ def binance_klines(symbol, interval, limit=200):
         })
     return rows
 
-def cg_ohlc_utc_daily(coin_id, vs="usd", days_fetch=90):
-    # Returns aggregated UTC-daily rows: date_utc, high, low, close, range
-    raw = cg_get(f"/coins/{coin_id}/ohlc", {"vs_currency": vs, "days": days_fetch})
-    day = {}
-    for ts, o, h, l, c in raw:
-        dt = datetime.fromtimestamp(ts/1000, tz=timezone.utc)
-        key = dt.date().isoformat()
-        if key not in day:
-            day[key] = {"high": h, "low": l, "close": c, "last_ts": ts}
-        else:
-            day[key]["high"] = max(day[key]["high"], h)
-            day[key]["low"] = min(day[key]["low"], l)
-            if ts > day[key]["last_ts"]:
-                day[key]["close"] = c
-                day[key]["last_ts"] = ts
-
-    today_utc = datetime.now(timezone.utc).date().isoformat()
-    keys = sorted(k for k in day.keys() if k != today_utc)
-    rows = []
-    for k in keys:
-        rows.append({
-            "date_utc": k,
-            "high": float(day[k]["high"]),
-            "low": float(day[k]["low"]),
-            "close": float(day[k]["close"]),
-            "range": float(day[k]["high"] - day[k]["low"]),
-        })
-    return rows
-
+# -----------------------------
+# NR logic (wie LuxAlgo Basis)
+# -----------------------------
 def last_closed_rows(rows, n):
     if not rows or len(rows) < n:
         return None
     return rows[-n:]
 
 def is_nrn(rows, n):
+    # NRn: letzte abgeschlossene Kerze hat die kleinste Range der letzten n Kerzen
     lastn = last_closed_rows(rows, n)
-    if not lastn: return False
+    if not lastn:
+        return False
     ranges = [r["range"] for r in lastn]
-    return ranges[-1] == min(ranges)  # tie zählt als NR
+    return ranges[-1] == min(ranges)  # Tie zählt als NR (wie Pine rng == lowest)
 
+# -----------------------------
+# App
+# -----------------------------
 def main():
     st.set_page_config(page_title="NR Scanner (Top Coins)", layout="wide")
     st.title("NR4 / NR7 / NR10 Scanner – Top Coins nach Market Cap")
 
     colA, colB, colC, colD = st.columns(4)
-    vs = colA.selectbox("Quote (MarketCap)", ["usd", "eur"], index=0)
-    top_n = colB.number_input("Top N (Market Cap)", 10, 300, DEFAULT_TOPN, 10)
+    vs = colA.selectbox("Quote (Market Cap)", ["usd", "eur"], index=0)
+    top_n = colB.number_input("Top N (Market Cap)", min_value=10, max_value=300, value=DEFAULT_TOPN, step=10)
     tf = colC.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
     mode = colD.selectbox("Close-Modus", ["UTC (letzte abgeschlossene Kerze)", "Exchange Close"], index=0)
 
-    st.caption("Hinweis: 4H/1W werden über Binance-Kerzen berechnet (Exchange Close). 1D kann UTC (CoinGecko) oder Exchange (Binance) sein.")
+    st.caption("Hinweis: 4H/1W laufen immer über Binance-Kerzen (Exchange Close). 1D kann UTC (CoinGecko) oder Exchange (Binance) sein.")
 
     col1, col2, col3 = st.columns(3)
     want_nr4 = col1.checkbox("NR4", value=True)
     want_nr7 = col2.checkbox("NR7", value=True)
     want_nr10 = col3.checkbox("NR10", value=True)
+
+    min_vol = st.number_input("Min. 24h Volumen (Quote)", min_value=0.0, value=0.0, step=1000000.0, help="Optional: z.B. 10000000 für > 10M")
 
     run = st.button("Scan starten")
 
@@ -138,17 +157,28 @@ def main():
         st.warning("Bitte mindestens NR4/NR7/NR10 auswählen.")
         return
 
-    with st.spinner("Hole Top Coins + scanne..."):
+    interval = {"1D": "1d", "4H": "4h", "1W": "1w"}[tf]
+
+    with st.spinner("Hole Top Coins (CoinGecko) + scanne..."):
         markets = get_top_markets(vs=vs, top_n=int(top_n))
+        st.write("Geladene Coins von CoinGecko:", len(markets))
 
-        exchange_info = None
+        # Binance symbols nur laden, wenn nötig
+        symset = None
         if tf != "1D" or mode == "Exchange Close":
-            exchange_info = binance_exchange_info()
-
-        interval = {"1D": "1d", "4H": "4h", "1W": "1w"}[tf]
+            symset = binance_symbols_set()
 
         results = []
         progress = st.progress(0)
+
+        # Stats
+        scanned = 0
+        skipped_low_vol = 0
+        skipped_no_data = 0
+        skipped_no_binance_pair = 0
+        errors = 0
+
+        status_box = st.empty()
 
         for i, coin in enumerate(markets, 1):
             coin_id = coin["id"]
@@ -156,32 +186,45 @@ def main():
             name = coin.get("name") or ""
             mcap = coin.get("market_cap")
             price = coin.get("current_price")
-            vol24 = coin.get("total_volume")
+            vol24 = float(coin.get("total_volume") or 0.0)
+
+            if min_vol and vol24 < float(min_vol):
+                skipped_low_vol += 1
+                progress.progress(i / len(markets))
+                continue
 
             try:
                 # Datenquelle wählen
                 if tf == "1D" and mode.startswith("UTC"):
                     rows = cg_ohlc_utc_daily(coin_id, vs=vs, days_fetch=90)
-                    # rows already closed UTC-day except "today"
-                    closed = rows
-                    last_day = closed[-1]["date_utc"] if closed else None
-                    last_range = closed[-1]["range"] if closed else None
+                    closed = rows  # letzte Zeile = letzte abgeschlossene UTC-Tageskerze
+                    if not closed or len(closed) < 10:
+                        skipped_no_data += 1
+                        progress.progress(i / len(markets))
+                        continue
+                    last_day = closed[-1]["date_utc"]
+                    last_range = closed[-1]["range"]
                     source = "CoinGecko UTC"
+
                 else:
-                    # Binance Exchange Close
+                    # Binance Exchange Close (für 4H/1W immer, für 1D wenn gewählt)
                     pair = f"{sym}USDT"
-                    if not binance_symbol_exists(exchange_info, pair):
-                        progress.progress(i/len(markets))
+                    if (symset is not None) and (pair not in symset):
+                        skipped_no_binance_pair += 1
+                        progress.progress(i / len(markets))
                         continue
+
                     kl = binance_klines(pair, interval=interval, limit=200)
-                    # Letzte Kerze ist evtl. live -> wir nehmen die letzte *abgeschlossene*
                     if len(kl) < 12:
-                        progress.progress(i/len(markets))
+                        skipped_no_data += 1
+                        progress.progress(i / len(markets))
                         continue
+
+                    # Letzte Kerze kann live sein -> letzte abgeschlossene = kl[:-1]
                     closed_kl = kl[:-1]
                     closed = []
                     for k in closed_kl:
-                        dt = datetime.fromtimestamp(k["close_time"]/1000, tz=timezone.utc)
+                        dt = datetime.fromtimestamp(k["close_time"] / 1000, tz=timezone.utc)
                         closed.append({
                             "date_utc": dt.isoformat(),
                             "high": k["high"],
@@ -189,18 +232,34 @@ def main():
                             "close": k["close"],
                             "range": k["high"] - k["low"]
                         })
+
+                    if len(closed) < 10:
+                        skipped_no_data += 1
+                        progress.progress(i / len(markets))
+                        continue
+
                     last_day = closed[-1]["date_utc"]
                     last_range = closed[-1]["range"]
                     source = f"Binance {interval}"
 
-                nr4 = want_nr4 and is_nrn(closed, 4)
+                scanned += 1
+
+                # --- NR Logik wie LuxAlgo ---
+                # LuxAlgo: nr7 = rng == lowest(rng,7)
+                #          nr4 = rng == lowest(rng,4) and not nr7
                 nr7 = want_nr7 and is_nrn(closed, 7)
+                nr4_raw = want_nr4 and is_nrn(closed, 4)
+                nr4 = nr4_raw and (not nr7)  # entscheidende LuxAlgo-Regel
                 nr10 = want_nr10 and is_nrn(closed, 10)
 
                 if nr4 or nr7 or nr10:
                     results.append({
                         "symbol": sym,
                         "name": name,
+                        "NR4": nr4,
+                        "NR7": nr7,
+                        "NR10": nr10,
+                        "coingecko_id": coin_id,
                         "market_cap": mcap,
                         "price": price,
                         "volume_24h": vol24,
@@ -208,18 +267,23 @@ def main():
                         "mode": mode,
                         "source": source,
                         "last_closed": last_day,
-                        "range_last": last_range,
-                        "NR4": nr4,
-                        "NR7": nr7,
-                        "NR10": nr10,
-                        "coingecko_id": coin_id
+                        "range_last": last_range
                     })
 
             except Exception:
-                pass
+                errors += 1
 
             progress.progress(i / len(markets))
-            time.sleep(0.15)
+
+            # Live-Status
+            status_box.info(
+                f"Fortschritt: {i}/{len(markets)} | gescannt: {scanned} | "
+                f"skip Vol: {skipped_low_vol} | skip no data: {skipped_no_data} | "
+                f"skip no Binance pair: {skipped_no_binance_pair} | errors: {errors}"
+            )
+
+            # kleine Pause, damit APIs nicht unnötig stressen
+            time.sleep(0.12)
 
         df = pd.DataFrame(results)
         if df.empty:
@@ -238,4 +302,5 @@ def main():
             mime="text/csv"
         )
 
-main()
+if __name__ == "__main__":
+    main()
