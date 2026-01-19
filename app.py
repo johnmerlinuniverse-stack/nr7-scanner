@@ -25,7 +25,6 @@ def cg_get(path, params=None):
 
 @st.cache_data(ttl=3600)
 def get_top_markets(vs="usd", top_n=150):
-    # /coins/markets liefert Krypto-Coins nach Market Cap (keine Aktien/ETFs)
     out = []
     per_page = 250
     page = 1
@@ -45,7 +44,6 @@ def get_top_markets(vs="usd", top_n=150):
     return out[:top_n]
 
 def cg_ohlc_utc_daily(coin_id, vs="usd", days_fetch=90):
-    # Aggregiert CoinGecko OHLC auf UTC-Tage, entfernt "heute" (unfertig)
     raw = cg_get(f"/coins/{coin_id}/ohlc", {"vs_currency": vs, "days": days_fetch})
 
     day = {}
@@ -97,6 +95,7 @@ def binance_klines(symbol, interval, limit=200):
     }, timeout=30)
     r.raise_for_status()
     data = r.json()
+
     rows = []
     for k in data:
         rows.append({
@@ -111,7 +110,7 @@ def binance_klines(symbol, interval, limit=200):
     return rows
 
 # -----------------------------
-# NR logic (wie LuxAlgo Basis)
+# NR logic (wie LuxAlgo)
 # -----------------------------
 def last_closed_rows(rows, n):
     if not rows or len(rows) < n:
@@ -119,12 +118,11 @@ def last_closed_rows(rows, n):
     return rows[-n:]
 
 def is_nrn(rows, n):
-    # NRn: letzte abgeschlossene Kerze hat die kleinste Range der letzten n Kerzen
     lastn = last_closed_rows(rows, n)
     if not lastn:
         return False
     ranges = [r["range"] for r in lastn]
-    return ranges[-1] == min(ranges)  # Tie zählt als NR (wie Pine rng == lowest)
+    return ranges[-1] == min(ranges)
 
 # -----------------------------
 # App
@@ -139,14 +137,22 @@ def main():
     tf = colC.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
     mode = colD.selectbox("Close-Modus", ["UTC (letzte abgeschlossene Kerze)", "Exchange Close"], index=0)
 
-    st.caption("Hinweis: 4H/1W laufen immer über Binance-Kerzen (Exchange Close). 1D kann UTC (CoinGecko) oder Exchange (Binance) sein.")
+    st.caption("Hinweis: 4H/1W laufen über Binance-Kerzen. 1D kann UTC (CoinGecko) oder Exchange (Binance) sein.")
 
     col1, col2, col3 = st.columns(3)
     want_nr4 = col1.checkbox("NR4", value=True)
     want_nr7 = col2.checkbox("NR7", value=True)
     want_nr10 = col3.checkbox("NR10", value=True)
 
-    min_vol = st.number_input("Min. 24h Volumen (Quote)", min_value=0.0, value=0.0, step=1000000.0, help="Optional: z.B. 10000000 für > 10M")
+    min_vol = st.number_input(
+        "Min. 24h Volumen (Quote)",
+        min_value=0.0,
+        value=0.0,
+        step=1000000.0,
+        help="Optional: z.B. 10000000 für > 10M"
+    )
+
+    speed = st.slider("Scan Geschwindigkeit (Pause pro Coin)", min_value=0.05, max_value=1.5, value=0.25, step=0.05)
 
     run = st.button("Scan starten")
 
@@ -159,9 +165,9 @@ def main():
 
     interval = {"1D": "1d", "4H": "4h", "1W": "1w"}[tf]
 
-    with st.spinner("Hole Top Coins (CoinGecko) + scanne..."):
+    with st.spinner("Hole Top Coins + scanne..."):
         markets = get_top_markets(vs=vs, top_n=int(top_n))
-        st.write("Geladene Coins von CoinGecko:", len(markets))
+        st.write("✅ Geladene Coins (CoinGecko):", len(markets))
 
         # Binance symbols nur laden, wenn nötig
         symset = None
@@ -171,14 +177,13 @@ def main():
         results = []
         progress = st.progress(0)
 
-        # Stats
         scanned = 0
         skipped_low_vol = 0
         skipped_no_data = 0
         skipped_no_binance_pair = 0
         errors = 0
-        last_errors = []
 
+        last_errors = []
         status_box = st.empty()
 
         for i, coin in enumerate(markets, 1):
@@ -198,7 +203,7 @@ def main():
                 # Datenquelle wählen
                 if tf == "1D" and mode.startswith("UTC"):
                     rows = cg_ohlc_utc_daily(coin_id, vs=vs, days_fetch=90)
-                    closed = rows  # letzte Zeile = letzte abgeschlossene UTC-Tageskerze
+                    closed = rows
                     if not closed or len(closed) < 10:
                         skipped_no_data += 1
                         progress.progress(i / len(markets))
@@ -208,8 +213,8 @@ def main():
                     source = "CoinGecko UTC"
 
                 else:
-                    # Binance Exchange Close (für 4H/1W immer, für 1D wenn gewählt)
                     pair = f"{sym}USDT"
+
                     if (symset is not None) and (pair not in symset):
                         skipped_no_binance_pair += 1
                         progress.progress(i / len(markets))
@@ -221,7 +226,6 @@ def main():
                         progress.progress(i / len(markets))
                         continue
 
-                    # Letzte Kerze kann live sein -> letzte abgeschlossene = kl[:-1]
                     closed_kl = kl[:-1]
                     closed = []
                     for k in closed_kl:
@@ -246,21 +250,22 @@ def main():
                 scanned += 1
 
                 # --- NR Logik wie LuxAlgo ---
-                # LuxAlgo: nr7 = rng == lowest(rng,7)
-                #          nr4 = rng == lowest(rng,4) and not nr7
                 nr7 = want_nr7 and is_nrn(closed, 7)
                 nr4_raw = want_nr4 and is_nrn(closed, 4)
-                nr4 = nr4_raw and (not nr7)  # entscheidende LuxAlgo-Regel
+                nr4 = nr4_raw and (not nr7)  # LuxAlgo Regel
                 nr10 = want_nr10 and is_nrn(closed, 10)
 
                 if nr4 or nr7 or nr10:
                     results.append({
+                        # ✅ DEINE Wunsch-Reihenfolge am Anfang:
                         "symbol": sym,
                         "name": name,
                         "NR4": nr4,
                         "NR7": nr7,
                         "NR10": nr10,
                         "coingecko_id": coin_id,
+
+                        # danach Rest:
                         "market_cap": mcap,
                         "price": price,
                         "volume_24h": vol24,
@@ -268,37 +273,44 @@ def main():
                         "mode": mode,
                         "source": source,
                         "last_closed": last_day,
-                        "range_last": last_range
+                        "range_last": last_range,
                     })
 
             except Exception as e:
                 errors += 1
-                if len(last_errors) < 10: last_errors.append(f"{sym} ({coin_id}): {type(e).__name__} - {str(e)[:120]}")
+                if len(last_errors) < 15:
+                    last_errors.append(f"{sym} ({coin_id}) -> {type(e).__name__}: {str(e)[:160]}")
 
-if last_errors:
-    st.warning("Beispiel Fehler (max 10):")
-    for err in last_errors:
-        st.write(err)
             progress.progress(i / len(markets))
-
-            # Live-Status
             status_box.info(
                 f"Fortschritt: {i}/{len(markets)} | gescannt: {scanned} | "
                 f"skip Vol: {skipped_low_vol} | skip no data: {skipped_no_data} | "
                 f"skip no Binance pair: {skipped_no_binance_pair} | errors: {errors}"
             )
+            time.sleep(float(speed))
 
-            # kleine Pause, damit APIs nicht unnötig stressen
-            time.sleep(0.35)
+        if last_errors:
+            st.warning("⚠️ Fehlerdetails (max 15):")
+            for err in last_errors:
+                st.write(err)
 
         df = pd.DataFrame(results)
         if df.empty:
             st.warning("Keine Treffer gefunden (oder API/Limit/Mapping-Probleme).")
             return
 
-        df = df.sort_values("market_cap", ascending=False).reset_index(drop=True)
+        # ✅ Erzwinge die Spaltenreihenfolge
+        first_cols = ["symbol", "name", "NR4", "NR7", "NR10", "coingecko_id"]
+        other_cols = [c for c in df.columns if c not in first_cols]
+        df = df[first_cols + other_cols]
 
-        st.subheader(f"Treffer: {len(df)}")
+        # optional: sort nach MarketCap
+        if "market_cap" in df.columns:
+            df = df.sort_values("market_cap", ascending=False)
+
+        df = df.reset_index(drop=True)
+
+        st.subheader(f"✅ Treffer: {len(df)}")
         st.dataframe(df, use_container_width=True)
 
         st.download_button(
@@ -310,8 +322,3 @@ if last_errors:
 
 if __name__ == "__main__":
     main()
-    
-
-
-
-
