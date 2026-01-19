@@ -335,26 +335,7 @@ def extract_tickers_from_text(text: str):
 # -----------------------------
 # App
 # -----------------------------
-colA, colB = st.columns(2)
-if colA.button("🔍 IDs aus CryptoWaves Liste erstellen"):
-    if not cw_tickers:
-        st.warning("Keine Ticker erkannt.")
-    else:
-        with st.spinner("Baue CoinGecko ID Mapping..."):
-            idmap, unresolved = build_id_map_for_symbols(cw_tickers)
-            st.success(f"Fertig: {len(idmap)} IDs erstellt")
-            st.dataframe(pd.DataFrame([{"symbol": k, "coingecko_id": v} for k, v in idmap.items()]))
 
-            st.download_button(
-                "⬇️ JSON herunterladen",
-                data=pd.Series(idmap).to_json(),
-                file_name="cw_id_map.json",
-                mime="application/json"
-            )
-
-            if unresolved:
-                st.warning(f"Nicht auflösbar: {len(unresolved)}")
-                st.write(unresolved)
 
 def main():
     st.set_page_config(page_title="NR Scanner (Top Coins / CryptoWaves)", layout="wide")
@@ -631,11 +612,31 @@ def main():
             file_name=f"nr_scan_{tf}.csv",
             mime="text/csv"
         )
-
+        colA, colB = st.columns(2)
+        if colA.button("🔍 IDs aus CryptoWaves Liste erstellen"):
+            if not cw_tickers:
+                st.warning("Keine Ticker erkannt.")
+            else:
+                with st.spinner("Baue CoinGecko ID Mapping..."):
+                    idmap, unresolved = build_id_map_for_symbols(cw_tickers)
+                    st.success(f"Fertig: {len(idmap)} IDs erstellt")
+                    st.dataframe(pd.DataFrame([{"symbol": k, "coingecko_id": v} for k, v in idmap.items()]))
+        
+                    st.download_button(
+                        "⬇️ JSON herunterladen",
+                        data=pd.Series(idmap).to_json(),
+                        file_name="cw_id_map.json",
+                        mime="application/json"
+                    )
+        
+                    if unresolved:
+                        st.warning(f"Nicht auflösbar: {len(unresolved)}")
+                        st.write(unresolved)
 
 
 
 if __name__ == "__main__":
     main()
+
 
 
