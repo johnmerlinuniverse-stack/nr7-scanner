@@ -40,7 +40,7 @@ def get_top_markets(vs="usd", top_n=150):
             break
         out.extend(batch)
         page += 1
-        time.sleep(0.8)
+        time.sleep(1.2)
     return out[:top_n]
 
 def cg_ohlc_utc_daily(coin_id, vs="usd", days_fetch=90):
