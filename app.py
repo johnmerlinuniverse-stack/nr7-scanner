@@ -177,6 +177,7 @@ def main():
         skipped_no_data = 0
         skipped_no_binance_pair = 0
         errors = 0
+        last_errors = []
 
         status_box = st.empty()
 
@@ -270,8 +271,11 @@ def main():
                         "range_last": last_range
                     })
 
-            except Exception:
+            except Exception as e:
                 errors += 1
+                if len(last_errors) < 10:
+                    last_errors.append(f"{sym} ({coin_id}): {type(e).__name__} - {str(e)[:120]}")
+
 
             progress.progress(i / len(markets))
 
@@ -283,7 +287,7 @@ def main():
             )
 
             # kleine Pause, damit APIs nicht unnötig stressen
-            time.sleep(0.12)
+            time.sleep(0.35)
 
         df = pd.DataFrame(results)
         if df.empty:
@@ -304,3 +308,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+if last_errors:
+    st.warning("Beispiel Fehler (max 10):")
+    for err in last_errors:
+        st.write(err)
+
