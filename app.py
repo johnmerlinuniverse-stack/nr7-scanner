@@ -275,7 +275,10 @@ def main():
                 errors += 1
                 if len(last_errors) < 10: last_errors.append(f"{sym} ({coin_id}): {type(e).__name__} - {str(e)[:120]}")
 
-
+if last_errors:
+    st.warning("Beispiel Fehler (max 10):")
+    for err in last_errors:
+        st.write(err)
             progress.progress(i / len(markets))
 
             # Live-Status
@@ -308,9 +311,7 @@ def main():
 if __name__ == "__main__":
     main()
     
-if last_errors:
-    st.warning("Beispiel Fehler (max 10):")
-    for err in last_errors:
-        st.write(err)
+
+
 
 
