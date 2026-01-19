@@ -120,6 +120,8 @@ XTZ
 JST
 PAXG"""
 
+DEFAULT_CW_ID_MAP = {}
+
 # -----------------------------
 # CoinGecko: rate limiter + retries
 # -----------------------------
@@ -243,6 +245,20 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
             "range": float(day[k]["high"] - day[k]["low"]),
         })
     return rows
+    
+@st.cache_data(ttl=24*3600)
+def build_id_map_for_symbols(symbols: list):
+    mapping = {}
+    unresolved = []
+    for s in symbols:
+        cid = cg_search_id_by_symbol(s)
+        if cid:
+            mapping[s] = cid
+        else:
+            unresolved.append(s)
+        time.sleep(0.35)  # schont Rate Limit
+    return mapping, unresolved
+
 
 # -----------------------------
 # Binance helpers
@@ -595,5 +611,28 @@ def main():
             mime="text/csv"
         )
 
+colA, colB = st.columns(2)
+if colA.button("🔍 IDs aus CryptoWaves Liste erstellen"):
+    if not cw_tickers:
+        st.warning("Keine Ticker erkannt.")
+    else:
+        with st.spinner("Baue CoinGecko ID Mapping..."):
+            idmap, unresolved = build_id_map_for_symbols(cw_tickers)
+            st.success(f"Fertig: {len(idmap)} IDs erstellt")
+            st.dataframe(pd.DataFrame([{"symbol": k, "coingecko_id": v} for k, v in idmap.items()]))
+
+            st.download_button(
+                "⬇️ JSON herunterladen",
+                data=pd.Series(idmap).to_json(),
+                file_name="cw_id_map.json",
+                mime="application/json"
+            )
+
+            if unresolved:
+                st.warning(f"Nicht auflösbar: {len(unresolved)}")
+                st.write(unresolved)
+
+
 if __name__ == "__main__":
     main()
+
