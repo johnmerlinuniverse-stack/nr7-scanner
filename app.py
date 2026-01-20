@@ -419,7 +419,7 @@ def main():
     # Mode switch: Simple vs Fancy
     view_mode = st.radio("Ansicht", ["Fancy", "Simple"], horizontal=True, index=0)
 
-    if view_mode == "Fancy":
+    if view_mode == "Simple":
         dark_mode = st.toggle("🌙 Dark Mode", value=True)
         apply_theme(dark_mode)
         fancy_header()
@@ -658,3 +658,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
