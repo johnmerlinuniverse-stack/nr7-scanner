@@ -17,6 +17,9 @@ BINANCE_KLINES_ENDPOINTS = [
     "https://data-api.binance.vision/api/v3/klines",
 ]
 
+# Quote-Priority: versucht diese Paare (reduziert massiv "skipped")
+QUOTE_PRIORITY = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
+
 CW_DEFAULT_TICKERS = """
 BTC
 ETH
@@ -128,7 +131,7 @@ S
 """.strip()
 
 # -----------------------------
-# CoinGecko rate-limit + retry (429)
+# CoinGecko rate-limit + retry
 # -----------------------------
 _CG_LAST_CALL = 0.0
 
@@ -154,20 +157,16 @@ def cg_get(path, params=None, max_retries=8, min_interval_sec=1.2):
         try:
             _cg_rate_limit(min_interval_sec)
             r = requests.get(CG_BASE + path, params=params, timeout=30)
-
             if r.status_code == 429:
                 time.sleep(backoff * attempt)
                 continue
-
             r.raise_for_status()
             return r.json()
-
         except requests.RequestException as e:
             last_exc = e
             if attempt == max_retries:
                 raise
             time.sleep(backoff * attempt)
-
     raise last_exc if last_exc else RuntimeError("CoinGecko Fehler (unbekannt).")
 
 @st.cache_data(ttl=3600)
@@ -190,20 +189,13 @@ def get_top_markets(vs="usd", top_n=150):
     return out[:top_n]
 
 def is_stablecoin_marketrow(row: dict) -> bool:
-    """
-    Heuristik: stablecoin wenn price ~ 1 und market cap rank vorhanden.
-    (Nicht perfekt, aber gut genug als UI-Option.)
-    """
     sym = (row.get("symbol") or "").lower()
     name = (row.get("name") or "").lower()
     price = row.get("current_price")
-
     stable_keywords = ["usd", "usdt", "usdc", "dai", "tusd", "usde", "fdusd", "usdp", "gusd", "eur", "euro", "gbp"]
     if any(k in sym for k in stable_keywords) or any(k in name for k in stable_keywords):
-        # weitere Prüfung über Preis
         if isinstance(price, (int, float)) and 0.97 <= float(price) <= 1.03:
             return True
-    # Preis-only fallback
     if isinstance(price, (int, float)) and 0.985 <= float(price) <= 1.015 and "btc" not in sym and "eth" not in sym:
         return True
     return False
@@ -220,7 +212,7 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
             day[key] = {"high": h, "low": l, "close": c, "last_ts": ts}
         else:
             day[key]["high"] = max(day[key]["high"], h)
-            day[key]["low"] = min(day[k]["low"], l) if (k := key) else l  # safe min update
+            day[key]["low"] = min(day[key]["low"], l)
             if ts > day[key]["last_ts"]:
                 day[key]["close"] = c
                 day[key]["last_ts"] = ts
@@ -247,18 +239,16 @@ def load_cw_id_map():
         return {}
 
 # -----------------------------
-# Binance robust (NO cache to avoid crash loops)
+# Binance robust
 # -----------------------------
 def binance_symbols_set():
-    last_err = None
     for url in BINANCE_EXCHANGEINFO_ENDPOINTS:
         try:
             r = requests.get(url, timeout=25)
             r.raise_for_status()
             info = r.json()
             return {s.get("symbol") for s in info.get("symbols", []) if s.get("status") == "TRADING"}
-        except Exception as e:
-            last_err = e
+        except Exception:
             continue
     return set()
 
@@ -283,6 +273,13 @@ def binance_klines(symbol, interval, limit=200):
             continue
     raise last_err if last_err else RuntimeError("Binance klines Fehler")
 
+def find_best_binance_pair(sym: str, symset: set) -> str | None:
+    for q in QUOTE_PRIORITY:
+        pair = f"{sym}{q}"
+        if pair in symset:
+            return pair
+    return None
+
 # -----------------------------
 # NR logic (LuxAlgo)
 # -----------------------------
@@ -300,7 +297,6 @@ def main():
     st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
     st.title("NR4 / NR7 Scanner")
 
-    # Schlanke UI (mobile-friendly)
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
     top_n = 150
@@ -336,7 +332,7 @@ def main():
     use_utc = (tf == "1D" and str(close_mode).startswith("UTC"))
 
     # Build scan list
-    scan_list = []  # items: {"symbol","name","coingecko_id"(optional)}
+    scan_list = []  # {"symbol","name","coingecko_id"}
     cw_map = load_cw_id_map()
 
     if universe == "CoinGecko Top N":
@@ -362,16 +358,14 @@ def main():
                 "coingecko_id": cw_map.get(sym, "")
             })
 
-    # Prepare Binance if Exchange Close
-    symset = None
-    binance_ok = True
+    # Binance symbols set
+    symset = set()
     if not use_utc:
         symset = binance_symbols_set()
         if not symset:
-            binance_ok = False
             if tf == "1D":
                 use_utc = True
-                st.warning("Binance ist von Streamlit Cloud aus aktuell nicht erreichbar. Fallback auf UTC (CoinGecko) aktiviert. (Langsamer)")
+                st.warning("Binance ist nicht erreichbar. Fallback auf UTC (CoinGecko) aktiviert. (Langsamer)")
             else:
                 st.error("Binance ist nicht erreichbar. Für 4H/1W ist ohne Binance kein zuverlässiger Exchange-Close-Feed möglich.")
                 return
@@ -388,58 +382,73 @@ def main():
             coin_id = item.get("coingecko_id", "")
 
             try:
-                if use_utc:
-                    # UTC: days_fetch fest 30, bewusst langsam
+                # 1) Versuch über Binance (Exchange Close), wenn aktiv
+                if not use_utc:
+                    pair = find_best_binance_pair(sym, symset)
+                    if pair:
+                        kl = binance_klines(pair, interval=interval, limit=200)
+                        if len(kl) >= 15:
+                            kl = kl[:-1]  # drop live candle
+                            closed = []
+                            for k in kl:
+                                dt = datetime.fromtimestamp(k["close_time"] / 1000, tz=timezone.utc)
+                                closed.append({
+                                    "date_utc": dt.isoformat(),
+                                    "high": k["high"],
+                                    "low": k["low"],
+                                    "close": k["close"],
+                                    "range": k["high"] - k["low"]
+                                })
+                            if len(closed) >= 12:
+                                source = f"Binance {interval} ({pair})"
+                                last_closed = closed[-1]["date_utc"]
+                                last_range = closed[-1]["range"]
+                            else:
+                                pair = None
+                        else:
+                            pair = None
+
+                    # 2) Wenn kein passendes Pair / zu wenig Daten -> bei 1D fallback auf UTC
+                    if (pair is None) and (tf == "1D"):
+                        if coin_id:
+                            rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
+                            if rows and len(rows) >= 12:
+                                closed = rows
+                                source = "CoinGecko UTC (fallback)"
+                                last_closed = closed[-1]["date_utc"]
+                                last_range = closed[-1]["range"]
+                            else:
+                                skipped.append(f"{sym} (no data Binance+UTC)")
+                                progress.progress(i / len(scan_list))
+                                continue
+                        else:
+                            skipped.append(f"{sym} (no Binance pair + no coingecko_id)")
+                            progress.progress(i / len(scan_list))
+                            continue
+
+                    # 3) 4H/1W ohne Pair bleibt skipped
+                    if (pair is None) and (tf != "1D"):
+                        skipped.append(f"{sym} (no Binance pair)")
+                        progress.progress(i / len(scan_list))
+                        continue
+
+                # UTC Modus
+                else:
                     if not coin_id:
                         skipped.append(f"{sym} (no coingecko_id)")
                         progress.progress(i / len(scan_list))
                         continue
-
                     rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
                     if not rows or len(rows) < 12:
                         skipped.append(f"{sym} (no utc data)")
                         progress.progress(i / len(scan_list))
                         continue
-
                     closed = rows
                     source = "CoinGecko UTC"
                     last_closed = closed[-1]["date_utc"]
                     last_range = closed[-1]["range"]
 
-                else:
-                    pair = f"{sym}USDT"
-                    if symset is not None and pair not in symset:
-                        skipped.append(f"{sym} (no Binance {pair})")
-                        progress.progress(i / len(scan_list))
-                        continue
-
-                    kl = binance_klines(pair, interval=interval, limit=200)
-                    if len(kl) < 15:
-                        skipped.append(f"{sym} (not enough klines)")
-                        progress.progress(i / len(scan_list))
-                        continue
-
-                    kl = kl[:-1]  # drop live candle
-                    closed = []
-                    for k in kl:
-                        dt = datetime.fromtimestamp(k["close_time"] / 1000, tz=timezone.utc)
-                        closed.append({
-                            "date_utc": dt.isoformat(),
-                            "high": k["high"],
-                            "low": k["low"],
-                            "close": k["close"],
-                            "range": k["high"] - k["low"]
-                        })
-
-                    if len(closed) < 12:
-                        skipped.append(f"{sym} (not enough closed)")
-                        progress.progress(i / len(scan_list))
-                        continue
-
-                    source = f"Binance {interval}"
-                    last_closed = closed[-1]["date_utc"]
-                    last_range = closed[-1]["range"]
-
+                # NR logic (LuxAlgo): NR4 suppressed if NR7
                 nr7 = want_nr7 and is_nrn(closed, 7)
                 nr4_raw = want_nr4 and is_nrn(closed, 4)
                 nr4 = nr4_raw and (not nr7)
@@ -457,7 +466,6 @@ def main():
                     })
 
             except Exception as e:
-                # keine Secrets leaken
                 key = os.getenv("COINGECKO_DEMO_API_KEY", "")
                 msg = str(e).replace(key, "***")
                 errors.append(f"{sym}: {type(e).__name__} - {msg[:140]}")
@@ -479,21 +487,20 @@ def main():
             mime="text/csv"
         )
 
-    # Debug/Report am Ende (aufklappbar)
     if skipped or errors:
         with st.expander("Report (nicht gescannt / Fehler)"):
             if skipped:
                 st.write("**Nicht gescannt (skipped):**")
-                for s in skipped[:200]:
+                for s in skipped[:250]:
                     st.write(s)
-                if len(skipped) > 200:
-                    st.caption(f"... und {len(skipped)-200} weitere")
+                if len(skipped) > 250:
+                    st.caption(f"... und {len(skipped)-250} weitere")
             if errors:
                 st.write("**Fehler:**")
-                for e in errors[:200]:
+                for e in errors[:250]:
                     st.write(e)
-                if len(errors) > 200:
-                    st.caption(f"... und {len(errors)-200} weitere")
+                if len(errors) > 250:
+                    st.caption(f"... und {len(errors)-250} weitere")
 
 if __name__ == "__main__":
     main()
