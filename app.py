@@ -17,7 +17,7 @@ BINANCE_KLINES_ENDPOINTS = [
     "https://data-api.binance.vision/api/v3/klines",
 ]
 
-# Quote-Priority: versucht diese Paare (reduziert massiv "skipped")
+# Quote-Priority: reduziert massiv "skipped" bei Exchange Close
 QUOTE_PRIORITY = ["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH"]
 
 CW_DEFAULT_TICKERS = """
@@ -131,6 +131,122 @@ S
 """.strip()
 
 # -----------------------------
+# Fancy theme helpers
+# -----------------------------
+def apply_theme(dark: bool):
+    if dark:
+        bg = "#0b1020"
+        card = "#121a33"
+        text = "#e8ecff"
+        muted = "#a9b1d6"
+        accent = "#7aa2f7"
+        border = "rgba(255,255,255,0.08)"
+        shadow = "rgba(0,0,0,0.28)"
+    else:
+        bg = "#f6f7fb"
+        card = "#ffffff"
+        text = "#121826"
+        muted = "#5b6475"
+        accent = "#2563eb"
+        border = "rgba(0,0,0,0.08)"
+        shadow = "rgba(0,0,0,0.10)"
+
+    st.markdown(f"""
+    <style>
+      .stApp {{
+        background: {bg};
+        color: {text};
+      }}
+      html, body, [class*="css"] {{
+        color: {text} !important;
+      }}
+      section.main > div {{
+        max-width: 980px;
+        padding-top: 0.8rem;
+      }}
+      .card {{
+        background: {card};
+        border: 1px solid {border};
+        border-radius: 16px;
+        padding: 14px 16px;
+        box-shadow: 0 12px 28px {shadow};
+      }}
+      .card h3 {{
+        margin: 0 0 6px 0;
+        font-size: 16px;
+        color: {text};
+      }}
+      .muted {{
+        color: {muted};
+        font-size: 13px;
+        line-height: 1.35;
+      }}
+      .badge {{
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        border: 1px solid {border};
+        background: rgba(127,127,127,0.08);
+        margin-right: 6px;
+        margin-bottom: 6px;
+      }}
+      .badge-accent {{
+        border-color: rgba(122,162,247,0.35);
+        background: rgba(122,162,247,0.12);
+        color: {accent};
+      }}
+      .stButton>button {{
+        border-radius: 12px !important;
+        padding: 0.55rem 0.95rem !important;
+        border: 1px solid {border} !important;
+      }}
+      .stTextArea textarea, .stTextInput input, .stSelectbox div[data-baseweb="select"] > div {{
+        border-radius: 12px !important;
+        border: 1px solid {border} !important;
+      }}
+      div[data-testid="stDataFrame"] {{
+        border: 1px solid {border};
+        border-radius: 16px;
+        overflow: hidden;
+      }}
+      @media (max-width: 640px) {{
+        section.main > div {{
+          padding-left: 0.8rem;
+          padding-right: 0.8rem;
+        }}
+      }}
+    </style>
+    """, unsafe_allow_html=True)
+
+def fancy_header():
+    st.markdown("""
+    <div class="card">
+      <h3>NR4 / NR7 Scanner</h3>
+      <div class="muted">
+        <span class="badge badge-accent">NR7 default</span>
+        <span class="badge">LuxAlgo-Logik</span>
+        <span class="badge">Pair-Fallback (USDT/USDC/FDUSD/...)</span>
+        <span class="badge">Exchange Close + UTC Fallback (1D)</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.write("")
+
+def fancy_summary(hit_count: int, skipped_count: int, errors_count: int):
+    st.markdown(f"""
+    <div class="card">
+      <h3>Scan Summary</h3>
+      <div class="muted">
+        <span class="badge badge-accent">Treffer: {hit_count}</span>
+        <span class="badge">Skipped: {skipped_count}</span>
+        <span class="badge">Errors: {errors_count}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.write("")
+
+# -----------------------------
 # CoinGecko rate-limit + retry
 # -----------------------------
 _CG_LAST_CALL = 0.0
@@ -192,12 +308,15 @@ def is_stablecoin_marketrow(row: dict) -> bool:
     sym = (row.get("symbol") or "").lower()
     name = (row.get("name") or "").lower()
     price = row.get("current_price")
+
     stable_keywords = ["usd", "usdt", "usdc", "dai", "tusd", "usde", "fdusd", "usdp", "gusd", "eur", "euro", "gbp"]
     if any(k in sym for k in stable_keywords) or any(k in name for k in stable_keywords):
         if isinstance(price, (int, float)) and 0.97 <= float(price) <= 1.03:
             return True
+
     if isinstance(price, (int, float)) and 0.985 <= float(price) <= 1.015 and "btc" not in sym and "eth" not in sym:
         return True
+
     return False
 
 @st.cache_data(ttl=6*3600)
@@ -273,7 +392,7 @@ def binance_klines(symbol, interval, limit=200):
             continue
     raise last_err if last_err else RuntimeError("Binance klines Fehler")
 
-def find_best_binance_pair(sym: str, symset: set) -> str | None:
+def find_best_binance_pair(sym: str, symset: set):
     for q in QUOTE_PRIORITY:
         pair = f"{sym}{q}"
         if pair in symset:
@@ -297,6 +416,15 @@ def main():
     st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
     st.title("NR4 / NR7 Scanner")
 
+    # Mode switch: Simple vs Fancy
+    view_mode = st.radio("Ansicht", ["Fancy", "Simple"], horizontal=True, index=0)
+
+    if view_mode == "Fancy":
+        dark_mode = st.toggle("🌙 Dark Mode", value=True)
+        apply_theme(dark_mode)
+        fancy_header()
+
+    # Controls (kept lean)
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
     top_n = 150
@@ -311,22 +439,21 @@ def main():
         close_mode = st.selectbox("Close", ["Exchange Close (empfohlen)", "UTC (langsam, days_fetch=30)"], index=0)
     else:
         close_mode = "Exchange Close (empfohlen)"
-        
-    # ✅ Erklärung zum Aufklappen (HIER einfügen!)
+
     with st.expander("ℹ️ Unterschied: Exchange Close vs UTC"):
         st.markdown("""
-    **Exchange Close (empfohlen)**  
-    - Kerzen kommen direkt von einer Börse (z. B. Binance).  
-    - „Tages-Close“ = Close der Börsen-Tageskerze.  
-    - ✅ Vorteil: Sehr praxisnah fürs Trading, meist schneller.  
-    - ❌ Nachteil: Nicht jeder Coin hat ein Börsen-Paar (z.B. kein USDT/USDC Pair).
-    
-    **UTC (letzte abgeschlossene Tageskerze)**  
-    - Ein Tag läuft immer von **00:00 bis 23:59 UTC** (weltweit gleich).  
-    - ✅ Vorteil: Einheitlich und vergleichbar über alle Märkte.  
-    - ❌ Nachteil: Langsamer, weil zusätzliche API-Abfragen nötig sind.  
-    """)
-        
+**Exchange Close (empfohlen)**  
+- Kerzen kommen direkt von einer Börse (z. B. Binance).  
+- Tages-Close = Close der Börsen-Tageskerze.  
+- ✅ Vorteil: Sehr praxisnah fürs Trading, meist schneller.  
+- ❌ Nachteil: Nicht jeder Coin hat ein passendes Pair (z.B. kein USDT/USDC/FDUSD Pair).
+
+**UTC (letzte abgeschlossene Tageskerze)**  
+- Ein Tag läuft immer von **00:00 bis 23:59 UTC** (einheitlich).  
+- ✅ Vorteil: Vergleichbar und konsistent.  
+- ❌ Nachteil: Langsamer (mehr API-Requests), kann minimal von Exchange-Kerzen abweichen.
+        """)
+
     c1, c2 = st.columns(2)
     want_nr7 = c1.checkbox("NR7", value=True)
     want_nr4 = c2.checkbox("NR4", value=False)
@@ -397,13 +524,18 @@ def main():
             coin_id = item.get("coingecko_id", "")
 
             try:
-                # 1) Versuch über Binance (Exchange Close), wenn aktiv
+                # Exchange Close: try Binance pairs; if not found and 1D -> UTC fallback
                 if not use_utc:
                     pair = find_best_binance_pair(sym, symset)
+                    closed = None
+                    source = None
+                    last_closed = None
+                    last_range = None
+
                     if pair:
                         kl = binance_klines(pair, interval=interval, limit=200)
                         if len(kl) >= 15:
-                            kl = kl[:-1]  # drop live candle
+                            kl = kl[:-1]
                             closed = []
                             for k in kl:
                                 dt = datetime.fromtimestamp(k["close_time"] / 1000, tz=timezone.utc)
@@ -419,12 +551,10 @@ def main():
                                 last_closed = closed[-1]["date_utc"]
                                 last_range = closed[-1]["range"]
                             else:
-                                pair = None
-                        else:
-                            pair = None
+                                closed = None
 
-                    # 2) Wenn kein passendes Pair / zu wenig Daten -> bei 1D fallback auf UTC
-                    if (pair is None) and (tf == "1D"):
+                    # Fallback for 1D if no binance data
+                    if closed is None and tf == "1D":
                         if coin_id:
                             rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
                             if rows and len(rows) >= 12:
@@ -441,23 +571,24 @@ def main():
                             progress.progress(i / len(scan_list))
                             continue
 
-                    # 3) 4H/1W ohne Pair bleibt skipped
-                    if (pair is None) and (tf != "1D"):
+                    if closed is None and tf != "1D":
                         skipped.append(f"{sym} (no Binance pair)")
                         progress.progress(i / len(scan_list))
                         continue
 
-                # UTC Modus
+                # UTC Mode
                 else:
                     if not coin_id:
                         skipped.append(f"{sym} (no coingecko_id)")
                         progress.progress(i / len(scan_list))
                         continue
+
                     rows = cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30)
                     if not rows or len(rows) < 12:
                         skipped.append(f"{sym} (no utc data)")
                         progress.progress(i / len(scan_list))
                         continue
+
                     closed = rows
                     source = "CoinGecko UTC"
                     last_closed = closed[-1]["date_utc"]
@@ -489,12 +620,20 @@ def main():
 
     df = pd.DataFrame(results)
     if df.empty:
+        if view_mode == "Fancy":
+            fancy_summary(0, len(skipped), len(errors))
         st.warning(f"Keine Treffer. Skipped: {len(skipped)} | Errors: {len(errors)}")
     else:
         df = df[["symbol", "name", "NR7", "NR4", "coingecko_id", "source", "last_closed", "range_last"]]
         df = df.sort_values(["NR7", "NR4", "symbol"], ascending=[False, False, True]).reset_index(drop=True)
-        st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
+
+        if view_mode == "Fancy":
+            fancy_summary(len(df), len(skipped), len(errors))
+        else:
+            st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
+
         st.dataframe(df, use_container_width=True)
+
         st.download_button(
             "CSV",
             df.to_csv(index=False).encode("utf-8"),
@@ -519,6 +658,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
