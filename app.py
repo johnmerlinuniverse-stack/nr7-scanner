@@ -309,21 +309,22 @@ def main():
 
     if tf == "1D":
         close_mode = st.selectbox("Close", ["Exchange Close (empfohlen)", "UTC (langsam, days_fetch=30)"], index=0)
-            with st.expander("Was ist der Unterschied zwischen Exchange Close und UTC?"):
-        st.markdown(
-            """
-                **Exchange Close (empfohlen)**  
-                - Kerzen kommen direkt von einer Börse (z. B. Binance).  
-                - Der Tages-Close ist der Close der Börsen-Tageskerze.  
-                - Vorteil: sehr praxisnah fürs Trading, meist schneller.  
-                - Nachteil: je nach Börse können Tagesgrenzen leicht anders sein; nicht jeder Coin hat ein passendes Pair.
-                
-                **UTC (letzte abgeschlossene Tageskerze)**  
-                - Ein Tag ist immer **00:00 bis 23:59 UTC** (einheitlicher “Kalender-Tag”).  
-                - Vorteil: weltweit konsistent, gut für Vergleiche/Backtests über verschiedene Datenquellen.  
-                - Nachteil: kann minimal von Exchange-Kerzen abweichen und ist meist langsamer (mehr API-Anfragen).
-            """
-        )
+with st.expander("Was ist der Unterschied zwischen Exchange Close und UTC?"):
+    st.markdown(
+        """
+**Exchange Close (empfohlen)**  
+- Kerzen kommen direkt von einer Börse (z. B. Binance).  
+- Der Tages-Close ist der Close der Börsen-Tageskerze.  
+- Vorteil: sehr praxisnah fürs Trading, meist schneller.  
+- Nachteil: je nach Börse können Tagesgrenzen leicht anders sein; nicht jeder Coin hat ein passendes Pair.
+
+**UTC (letzte abgeschlossene Tageskerze)**  
+- Ein Tag ist immer **00:00 bis 23:59 UTC** (einheitlicher “Kalender-Tag”).  
+- Vorteil: weltweit konsistent, gut für Vergleiche/Backtests über verschiedene Datenquellen.  
+- Nachteil: kann minimal von Exchange-Kerzen abweichen und ist meist langsamer (mehr API-Anfragen).
+        """
+    )
+
 
     else:
         close_mode = "Exchange Close (empfohlen)"
@@ -520,4 +521,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
