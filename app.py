@@ -7,8 +7,14 @@ import streamlit as st
 from datetime import datetime, timezone
 
 CG_BASE = "https://api.coingecko.com/api/v3"
-BINANCE_BASE = "https://api.binance.com"
+BINANCE_ENDPOINTS = [
+    "https://api.binance.com",         # primary
+    "https://data-api.binance.vision", # common fallback
+]
 
+# -----------------------------
+# CryptoWaves Default Liste
+# -----------------------------
 CW_DEFAULT_TICKERS = """
 BTC
 ETH
@@ -123,6 +129,7 @@ S
 # CoinGecko (nur für UTC Mode / Top150)
 # -----------------------------
 _CG_LAST_CALL = 0.0
+
 def _cg_rate_limit(min_interval_sec: float):
     global _CG_LAST_CALL
     now = time.time()
@@ -156,25 +163,6 @@ def cg_get(path, params=None, max_retries=8, min_interval_sec=1.2):
                 raise
             time.sleep(backoff * attempt)
     raise last_exc if last_exc else RuntimeError("CoinGecko Fehler (unbekannt).")
-
-@st.cache_data(ttl=3600)
-def get_top_markets(vs="usd", top_n=150):
-    out = []
-    per_page = 250
-    page = 1
-    while len(out) < top_n:
-        batch = cg_get("/coins/markets", {
-            "vs_currency": vs,
-            "order": "market_cap_desc",
-            "per_page": per_page,
-            "page": page,
-            "sparkline": "false"
-        })
-        if not batch:
-            break
-        out.extend(batch)
-        page += 1
-    return out[:top_n]
 
 def load_cw_id_map():
     try:
@@ -215,23 +203,38 @@ def cg_ohlc_utc_daily_cached(coin_id, vs="usd", days_fetch=30):
     return rows
 
 # -----------------------------
-# Binance
+# Binance robust fetch
 # -----------------------------
+def _binance_get(path, params=None, max_retries=6):
+    if params is None:
+        params = {}
+    backoff = 2.0
+    last_exc = None
+
+    for base in BINANCE_ENDPOINTS:
+        for attempt in range(1, max_retries + 1):
+            try:
+                r = requests.get(base + path, params=params, timeout=25)
+                # Retry on rate-limit / transient
+                if r.status_code in (418, 429, 500, 502, 503, 504):
+                    time.sleep(backoff * attempt)
+                    continue
+                r.raise_for_status()
+                return r.json(), base
+            except requests.RequestException as e:
+                last_exc = e
+                time.sleep(backoff * attempt)
+
+    raise last_exc if last_exc else RuntimeError("Binance Fehler (unbekannt).")
+
 @st.cache_data(ttl=3600)
 def binance_symbols_set():
-    r = requests.get(BINANCE_BASE + "/api/v3/exchangeInfo", timeout=30)
-    r.raise_for_status()
-    info = r.json()
-    return {s.get("symbol") for s in info.get("symbols", []) if s.get("status") == "TRADING"}
+    data, used_base = _binance_get("/api/v3/exchangeInfo")
+    syms = {s.get("symbol") for s in data.get("symbols", []) if s.get("status") == "TRADING"}
+    return syms, used_base
 
-def binance_klines(symbol, interval, limit=200):
-    r = requests.get(BINANCE_BASE + "/api/v3/klines", params={
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }, timeout=30)
-    r.raise_for_status()
-    data = r.json()
+def binance_klines(base_url, symbol, interval, limit=200):
+    data, _ = _binance_get("/api/v3/klines", params={"symbol": symbol, "interval": interval, "limit": limit})
     rows = []
     for k in data:
         rows.append({
@@ -253,16 +256,16 @@ def is_nrn(rows, n):
     return ranges[-1] == min(ranges)
 
 # -----------------------------
-# UI
+# UI / App
 # -----------------------------
 def main():
     st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
     st.title("NR4 / NR7 Scanner")
 
-    universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top 150"], index=0)
+    universe = st.selectbox("Coins", ["CryptoWaves (Default)"], index=0)  # default only (schlank)
     tf = st.selectbox("Timeframe", ["1D", "4H", "1W"], index=0)
 
-    # Default: Exchange Close (empfohlen)
+    # Default: Exchange Close (empfohlen) – aber wir fallbacken automatisch, wenn Binance nicht geht
     if tf == "1D":
         mode = st.selectbox("Close", ["Exchange Close (empfohlen)", "UTC (langsam, days_fetch=30)"], index=0)
     else:
@@ -272,9 +275,7 @@ def main():
     want_nr7 = c1.checkbox("NR7", value=True)
     want_nr4 = c2.checkbox("NR4", value=False)
 
-    tickers_text = None
-    if universe.startswith("CryptoWaves"):
-        tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
+    tickers_text = st.text_area("Ticker (1 pro Zeile)", value=CW_DEFAULT_TICKERS, height=110)
 
     run = st.button("Scan")
 
@@ -288,26 +289,28 @@ def main():
     use_utc = (tf == "1D" and str(mode).startswith("UTC"))
     vs = "usd"
 
+    # Parse tickers
+    symbols = []
+    for line in (tickers_text or "").splitlines():
+        s = line.strip().upper()
+        if s and s not in symbols:
+            symbols.append(s)
+
     cw_map = load_cw_id_map()
 
-    # Build list
-    markets = []
-    if universe == "CoinGecko Top 150":
-        markets = get_top_markets(vs=vs, top_n=150)
-    else:
-        raw = tickers_text or ""
-        symbols = []
-        for line in raw.splitlines():
-            s = line.strip().upper()
-            if s and s not in symbols:
-                symbols.append(s)
-        for sym in symbols:
-            # coin_id nur aus map (kein auto-resolve im Exchange Mode!)
-            markets.append({"symbol": sym, "name": sym, "id": cw_map.get(sym)})
-
+    # Prepare Binance symbols set if Exchange Close
     symset = None
+    used_binance_base = None
     if not use_utc:
-        symset = binance_symbols_set()
+        try:
+            symset, used_binance_base = binance_symbols_set()
+        except Exception as e:
+            # Binance blocked -> fallback to UTC automatically
+            use_utc = True
+            st.warning("Binance ist von Streamlit Cloud aus aktuell nicht erreichbar. Ich schalte automatisch auf UTC (CoinGecko) um. (Langsamer)")
+            # show short error detail (no secrets)
+            msg = str(e)[:140]
+            st.caption(f"Binance Fehler: {type(e).__name__}: {msg}")
 
     results = []
     errors = 0
@@ -316,39 +319,39 @@ def main():
     progress = st.progress(0)
 
     with st.spinner("Scanne..."):
-        for i, coin in enumerate(markets, 1):
+        for i, sym in enumerate(symbols, 1):
             try:
-                sym = (coin.get("symbol") or "").upper()
-                name = coin.get("name") or sym
-                coin_id = coin.get("id")
-
-                # UTC Mode braucht CoinGecko-ID -> wenn fehlt, skip (bewusst)
-                if use_utc and not coin_id:
-                    skipped += 1
-                    progress.progress(i / len(markets))
-                    continue
+                coin_id = cw_map.get(sym, "")
 
                 if use_utc:
+                    # UTC braucht ID -> wenn fehlt, skip (bewusst stabil)
+                    if not coin_id:
+                        skipped += 1
+                        progress.progress(i / len(symbols))
+                        continue
+
                     rows = cg_ohlc_utc_daily_cached(coin_id, vs=vs, days_fetch=30)
                     if not rows or len(rows) < 12:
                         skipped += 1
-                        progress.progress(i / len(markets))
+                        progress.progress(i / len(symbols))
                         continue
+
                     closed = rows
                     source = "CoinGecko UTC"
                     last_closed = closed[-1]["date_utc"]
                     last_range = closed[-1]["range"]
+
                 else:
                     pair = f"{sym}USDT"
                     if symset is not None and pair not in symset:
                         skipped += 1
-                        progress.progress(i / len(markets))
+                        progress.progress(i / len(symbols))
                         continue
 
-                    kl = binance_klines(pair, interval=interval, limit=200)
+                    kl = binance_klines(used_binance_base, pair, interval=interval, limit=200)
                     if len(kl) < 15:
                         skipped += 1
-                        progress.progress(i / len(markets))
+                        progress.progress(i / len(symbols))
                         continue
 
                     kl = kl[:-1]
@@ -365,7 +368,7 @@ def main():
 
                     if len(closed) < 12:
                         skipped += 1
-                        progress.progress(i / len(markets))
+                        progress.progress(i / len(symbols))
                         continue
 
                     source = f"Binance {interval}"
@@ -379,10 +382,9 @@ def main():
                 if nr7 or nr4:
                     results.append({
                         "symbol": sym,
-                        "name": name,
                         "NR7": nr7,
                         "NR4": nr4,
-                        "coingecko_id": coin_id or "",
+                        "coingecko_id": coin_id,
                         "source": source,
                         "last_closed": last_closed,
                         "range_last": last_range,
@@ -390,12 +392,11 @@ def main():
 
             except Exception as e:
                 errors += 1
-                key = os.getenv("COINGECKO_DEMO_API_KEY", "")
-                msg = str(e).replace(key, "***")
+                msg = str(e)[:140]
                 if len(last_errors) < 8:
-                    last_errors.append(f"{coin.get('symbol','').upper()} -> {type(e).__name__}: {msg[:140]}")
+                    last_errors.append(f"{sym} -> {type(e).__name__}: {msg}")
 
-            progress.progress(i / len(markets))
+            progress.progress(i / len(symbols))
 
     df = pd.DataFrame(results)
     if df.empty:
@@ -406,9 +407,10 @@ def main():
                     st.write(x)
         return
 
-    df = df[["symbol", "name", "NR7", "NR4", "coingecko_id", "source", "last_closed", "range_last"]]
+    df = df[["symbol", "NR7", "NR4", "coingecko_id", "source", "last_closed", "range_last"]]
     df = df.sort_values(["NR7", "NR4", "symbol"], ascending=[False, False, True]).reset_index(drop=True)
 
+    # Minimal output, mobile-friendly
     st.write(f"Treffer: {len(df)} | Skipped: {skipped} | Errors: {errors}")
     st.dataframe(df, use_container_width=True)
 
