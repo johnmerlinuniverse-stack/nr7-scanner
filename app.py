@@ -131,122 +131,6 @@ S
 """.strip()
 
 # -----------------------------
-# Fancy theme helpers
-# -----------------------------
-def apply_theme(dark: bool):
-    if dark:
-        bg = "#0b1020"
-        card = "#121a33"
-        text = "#e8ecff"
-        muted = "#a9b1d6"
-        accent = "#7aa2f7"
-        border = "rgba(255,255,255,0.08)"
-        shadow = "rgba(0,0,0,0.28)"
-    else:
-        bg = "#f6f7fb"
-        card = "#ffffff"
-        text = "#121826"
-        muted = "#5b6475"
-        accent = "#2563eb"
-        border = "rgba(0,0,0,0.08)"
-        shadow = "rgba(0,0,0,0.10)"
-
-    st.markdown(f"""
-    <style>
-      .stApp {{
-        background: {bg};
-        color: {text};
-      }}
-      html, body, [class*="css"] {{
-        color: {text} !important;
-      }}
-      section.main > div {{
-        max-width: 980px;
-        padding-top: 0.8rem;
-      }}
-      .card {{
-        background: {card};
-        border: 1px solid {border};
-        border-radius: 16px;
-        padding: 14px 16px;
-        box-shadow: 0 12px 28px {shadow};
-      }}
-      .card h3 {{
-        margin: 0 0 6px 0;
-        font-size: 16px;
-        color: {text};
-      }}
-      .muted {{
-        color: {muted};
-        font-size: 13px;
-        line-height: 1.35;
-      }}
-      .badge {{
-        display: inline-block;
-        padding: 3px 10px;
-        border-radius: 999px;
-        font-size: 12px;
-        border: 1px solid {border};
-        background: rgba(127,127,127,0.08);
-        margin-right: 6px;
-        margin-bottom: 6px;
-      }}
-      .badge-accent {{
-        border-color: rgba(122,162,247,0.35);
-        background: rgba(122,162,247,0.12);
-        color: {accent};
-      }}
-      .stButton>button {{
-        border-radius: 12px !important;
-        padding: 0.55rem 0.95rem !important;
-        border: 1px solid {border} !important;
-      }}
-      .stTextArea textarea, .stTextInput input, .stSelectbox div[data-baseweb="select"] > div {{
-        border-radius: 12px !important;
-        border: 1px solid {border} !important;
-      }}
-      div[data-testid="stDataFrame"] {{
-        border: 1px solid {border};
-        border-radius: 16px;
-        overflow: hidden;
-      }}
-      @media (max-width: 640px) {{
-        section.main > div {{
-          padding-left: 0.8rem;
-          padding-right: 0.8rem;
-        }}
-      }}
-    </style>
-    """, unsafe_allow_html=True)
-
-def fancy_header():
-    st.markdown("""
-    <div class="card">
-      <h3>NR4 / NR7 Scanner</h3>
-      <div class="muted">
-        <span class="badge badge-accent">NR7 default</span>
-        <span class="badge">LuxAlgo-Logik</span>
-        <span class="badge">Pair-Fallback (USDT/USDC/FDUSD/...)</span>
-        <span class="badge">Exchange Close + UTC Fallback (1D)</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.write("")
-
-def fancy_summary(hit_count: int, skipped_count: int, errors_count: int):
-    st.markdown(f"""
-    <div class="card">
-      <h3>Scan Summary</h3>
-      <div class="muted">
-        <span class="badge badge-accent">Treffer: {hit_count}</span>
-        <span class="badge">Skipped: {skipped_count}</span>
-        <span class="badge">Errors: {errors_count}</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-    st.write("")
-
-# -----------------------------
 # CoinGecko rate-limit + retry
 # -----------------------------
 _CG_LAST_CALL = 0.0
@@ -416,15 +300,6 @@ def main():
     st.set_page_config(page_title="NR4/NR7 Scanner", layout="wide")
     st.title("NR4 / NR7 Scanner")
 
-    # Mode switch: Simple vs Fancy
-    view_mode = st.radio("Ansicht", ["Fancy", "Simple"], horizontal=True, index=1)
-    
-    if view_mode == "Simple":
-        dark_mode = st.toggle("🌙 Dark Mode", value=True)
-        apply_theme(dark_mode)
-        fancy_header()
-
-    # Controls (kept lean)
     universe = st.selectbox("Coins", ["CryptoWaves (Default)", "CoinGecko Top N"], index=0)
 
     top_n = 150
@@ -473,7 +348,6 @@ def main():
     interval = {"1D": "1d", "4H": "4h", "1W": "1w"}[tf]
     use_utc = (tf == "1D" and str(close_mode).startswith("UTC"))
 
-    # Build scan list
     scan_list = []  # {"symbol","name","coingecko_id"}
     cw_map = load_cw_id_map()
 
@@ -500,7 +374,6 @@ def main():
                 "coingecko_id": cw_map.get(sym, "")
             })
 
-    # Binance symbols set
     symset = set()
     if not use_utc:
         symset = binance_symbols_set()
@@ -620,20 +493,12 @@ def main():
 
     df = pd.DataFrame(results)
     if df.empty:
-        if view_mode == "Fancy":
-            fancy_summary(0, len(skipped), len(errors))
         st.warning(f"Keine Treffer. Skipped: {len(skipped)} | Errors: {len(errors)}")
     else:
         df = df[["symbol", "name", "NR7", "NR4", "coingecko_id", "source", "last_closed", "range_last"]]
         df = df.sort_values(["NR7", "NR4", "symbol"], ascending=[False, False, True]).reset_index(drop=True)
-
-        if view_mode == "Fancy":
-            fancy_summary(len(df), len(skipped), len(errors))
-        else:
-            st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
-
+        st.write(f"Treffer: {len(df)} | Skipped: {len(skipped)} | Errors: {len(errors)}")
         st.dataframe(df, use_container_width=True)
-
         st.download_button(
             "CSV",
             df.to_csv(index=False).encode("utf-8"),
@@ -658,5 +523,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
