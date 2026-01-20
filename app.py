@@ -417,8 +417,8 @@ def main():
     st.title("NR4 / NR7 Scanner")
 
     # Mode switch: Simple vs Fancy
-    view_mode = st.radio("Ansicht", ["Fancy", "Simple"], horizontal=True, index=0)
-
+    view_mode = st.radio("Ansicht", ["Fancy", "Simple"], horizontal=True, index=1)
+    
     if view_mode == "Simple":
         dark_mode = st.toggle("🌙 Dark Mode", value=True)
         apply_theme(dark_mode)
@@ -658,4 +658,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
